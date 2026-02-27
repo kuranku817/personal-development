@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { padding: 30px 10px; background: #f8f9fa; }
+    .app-card { max-width: 500px; margin: auto; background: white; padding: 25px; border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.08); }
+    .slot-btn { margin: 4px; width: 85px; font-size: 0.9rem; transition: 0.2s; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="container app-card">
+    <h4 class="text-center mb-4">📅 日程予約</h4>
+    
+    <div id="step1">
+      <label class="form-label fw-bold">1. 日付を選択</label>
+      <input type="date" id="target-date" class="form-control mb-4" onchange="loadSlots()">
+      
+      <div id="slot-section" class="hidden">
+        <label class="form-label fw-bold">2. 時間を選択</label>
+        <p class="small text-muted">最大 <span id="max-limit"></span> 枠まで選択可能です</p>
+        <div id="slots-container" class="d-flex flex-wrap mb-4"></div>
+        <button id="next-btn" class="btn btn-primary w-100 hidden" onclick="goToStep2()">次へ進む</button>
+      </div>
+    </div>
+
+    <div id="step2" class="hidden">
+      <div class="alert alert-info small" id="selection-summary"></div>
+      <form id="res-form">
+        <div class="mb-3"><label class="form-label">お名前</label><input type="text" id="u-name" class="form-control" required></div>
+        <div class="mb-3"><label class="form-label">メールアドレス</label><input type="email" id="u-email" class="form-control" required></div>
+        <div class="mb-3"><label class="form-label">備考</label><textarea id="u-notes" class="form-control" rows="2"></textarea></div>
+        <button type="button" id="sub-btn" class="btn btn-success w-100" onclick="finalSubmit()">予約を確定する</button>
+        <button type="button" class="btn btn-link w-100 btn-sm mt-2" onclick="location.reload()">やり直す</button>
+      </form>
+    </div>
+
+    <div id="step3" class="hidden text-center py-4"><h5>✅ 予約完了！</h5><p>カレンダーを確認してください。</p></div>
+  </div>
+
+  <script>
+    let selectedSlots = [];
+    let appConfig = {};
+
+    window.onload = () => {
+      const d = document.getElementById('target-date');
+      d.value = new Date().toISOString().split('T')[0];
+      loadSlots();
+    };
+
+    function loadSlots() {
+      const date = document.getElementById('target-date').value;
+      google.script.run.withSuccessHandler(res => {
+        appConfig = res.config;
+        document.getElementById('max-limit').innerText = appConfig.maxContinuous;
+        renderSlots(res.slots);
+      }).getAvailableSlotsForFront(date);
+    }
+
+    function renderSlots(slots) {
+      document.getElementById('slot-section').classList.remove('hidden');
+      const container = document.getElementById('slots-container');
+      container.innerHTML = slots.length ? '' : '<p class="text-muted">空きがありません</p>';
+      selectedSlots = [];
+      updateUI();
+
+      slots.forEach(time => {
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-outline-primary slot-btn';
+        btn.innerText = time;
+        btn.onclick = () => toggleSlot(btn, time);
+        container.appendChild(btn);
+      });
+    }
+
+    function toggleSlot(btn, time) {
+      if (selectedSlots.includes(time)) {
+        selectedSlots = selectedSlots.filter(t => t !== time);
+        btn.classList.replace('btn-primary', 'btn-outline-primary');
+      } else {
+        if (selectedSlots.length >= appConfig.maxContinuous) {
+          alert(`最大${appConfig.maxContinuous}枠までです`);
+          return;
+        }
+        selectedSlots.push(time);
+        btn.classList.replace('btn-outline-primary', 'btn-primary');
+      }
+      updateUI();
+    }
+
+    function updateUI() {
+      document.getElementById('next-btn').classList.toggle('hidden', selectedSlots.length === 0);
+    }
+
+    function goToStep2() {
+      selectedSlots.sort();
+      document.getElementById('step1').classList.add('hidden');
+      document.getElementById('step2').classList.remove('hidden');
+      document.getElementById('selection-summary').innerText = 
+        `予約日時: ${document.getElementById('target-date').value} ${selectedSlots[0]} 〜 (計 ${selectedSlots.length}枠)`;
+    }
+
+    function finalSubmit() {
+      const btn = document.getElementById('sub-btn');
+      btn.disabled = true;
+      btn.innerText = "送信中...";
+
+      const data = {
+        date: document.getElementById('target-date').value,
+        times: selectedSlots,
+        name: document.getElementById('u-name').value,
+        email: document.getElementById('u-email').value,
+        notes: document.getElementById('u-notes').value
+      };
+
+      google.script.run
+        .withSuccessHandler(() => {
+          document.getElementById('step2').classList.add('hidden');
+          document.getElementById('step3').classList.remove('hidden');
+        })
+        .withFailureHandler(err => {
+          alert("エラー: " + err.message);
+          btn.disabled = false;
+          btn.innerText = "予約を確定する";
+        })
+        .submitReservation(data);
+    }
+  </script>
+</body>
+</html>
