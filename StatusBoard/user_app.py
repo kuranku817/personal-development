@@ -137,23 +137,28 @@ class UserApp(ctk.CTk):
             print(f"Log Save Error: {e}")
 
     def stop_current_task(self):
+        """現在稼働中のタスクがあればCSVに書き出して終了する"""
         if self.current_task and self.start_time:
+            # ここで初めてCSVに1行書き込まれる
             self.save_log(self.current_task, self.start_time, datetime.now())
+            # 状態をリセット
+            self.current_task = None
+            self.start_time = None
 
     def switch_task(self):
         new_task = self.task_combo.get()
         if not new_task or new_task == "タスクが設定されていません":
             return
             
+        # 1. 今までやってたタスクがあれば、その「終了」をログに記録する
         self.stop_current_task()
+        
+        # 2. 新しいタスクの状態をセット（ここではまだCSVには書かない！）
         self.current_task = new_task
         self.start_time = datetime.now()
-        self.save_log(self.current_task, self.start_time, None)
         
-        # --- ここが重要！ ---
-        # 1. ステータスを即更新
+        # 3. UIの表示だけ即座に更新する
         self.status_label.configure(text=f"稼働中: {self.current_task}", text_color="#00FFFF")
-        # 2. 1秒待たずに「今すぐ」画面表示を更新する関数を呼ぶ
         self.refresh_timer_display()
 
     def refresh_timer_display(self):
@@ -181,13 +186,12 @@ class UserApp(ctk.CTk):
         self.task_combo.set("休憩")
 
     def finish_work(self):
+        """業務終了ボタン"""
         if not self.current_task: return
         if messagebox.askyesno("業務終了", "本日の業務を終了しますか？"):
-            self.stop_current_task()
-            self.current_task = None
-            self.start_time = None
+            self.stop_current_task() # ここで最後のタスクが記録される
             self.status_label.configure(text="業務終了", text_color="red")
-            self.timer_label.configure(text="00:00:00")
+            self.timer_label.configure(text="0:00:00")
 
     def update_timer(self):
         """1秒ごとに実行されるループ"""
