@@ -1,14 +1,13 @@
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+import customtkinter as ctk
 import json
-import csv
 import os
-import glob
+import csv
 from datetime import datetime
+import socket
+from tkinter import messagebox, filedialog
 
 # --- ローカル保存用の設定ファイル名 ---
-LOCAL_SETTING_FILE = "admin_settings.json"
-DEFAULT_CONFIG_NAME = "config.json"
+LOCAL_SETTING_FILE = "user_settings.json"
 
 def get_local_config_path():
     """保存された共有設定(config.json)のパスを読み込む"""
@@ -25,251 +24,193 @@ def save_local_config_path(path):
     with open(LOCAL_SETTING_FILE, "w", encoding="utf-8") as f:
         json.dump({"config_path": path}, f, indent=4, ensure_ascii=False)
 
-class AdminApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("進捗管理者パネル (Ultimate Distributed Edition)")
-        self.root.geometry("850x900")
-
-        # 1. 共有設定ファイルのパス取得とロード
-        if not self.init_config_path():
-            self.root.destroy()
-            return
-
-        self.auto_refresh = tk.BooleanVar(value=True)
-        self.setup_ui()
-        self.refresh_monitor()
-
-    def init_config_path(self):
-        """初回起動時のパス選択と設定の読み込み"""
+class UserApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        
+        # 1. 設定ファイルのパス取得
         self.config_path = get_local_config_path()
         
         if not self.config_path or not os.path.exists(self.config_path):
-            messagebox.showinfo("初期設定", "共有フォルダにある管理用設定ファイル (config.json) を選択してください。")
+            messagebox.showinfo("初期設定", "管理者の設定ファイル (config.json) を選択してください。")
             self.config_path = filedialog.askopenfilename(
-                title="共有config.jsonを選択",
+                title="config.jsonを選択",
                 filetypes=[("JSON files", "*.json")]
             )
             if not self.config_path:
-                messagebox.showerror("エラー", "設定ファイルがないと管理機能は使用できません。")
-                return False
+                self.destroy()
+                return
             save_local_config_path(self.config_path)
 
+        # 2. 設定の読み込み
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 self.config = json.load(f)
-                # 必須キーの補完
-                if "admins" not in self.config: self.config["admins"] = []
-                if "refresh_ms" not in self.config: self.config["refresh_ms"] = 3000
-            return True
         except Exception as e:
-            messagebox.showerror("読込エラー", f"設定の読み込みに失敗しました:\n{e}")
-            return False
+            messagebox.showerror("エラー", f"設定の読み込みに失敗しました:\n{e}")
+            self.destroy()
+            return
+
+        # 3. 基本情報のセットアップ
+        self.pc_name = socket.gethostname()
+        save_path = self.config.get("save_path", "logs")
+        self.log_file = os.path.join(save_path, f"{self.pc_name}.csv")
+        
+        # 状態管理
+        self.current_task = None
+        self.start_time = None
+
+        # 4. UI初期化
+        self.setup_ui()
+        self.init_log_file()
+        
+        # 5. タイマーループ開始
+        self.update_timer()
 
     def setup_ui(self):
-        # メインスクロール
-        canvas = tk.Canvas(self.root)
-        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=canvas.yview)
-        self.scrollable_frame = ttk.Frame(canvas)
-        self.scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        self.title("進捗入力くん")
+        self.geometry("400x450")
+        ctk.set_appearance_mode("dark")
 
-        # --- 現在の接続先情報 ---
-        info_frame = ttk.Frame(self.scrollable_frame)
-        info_frame.pack(fill="x", padx=20, pady=5)
-        ttk.Label(info_frame, text=f"接続先: {self.config_path}", font=("Arial", 8), foreground="gray").pack(side="left")
-        ttk.Button(info_frame, text="接続先変更", command=self.reset_connection, style="Small.TButton").pack(side="right")
-
-        # --- 1. モニターセクション ---
-        mon_head = ttk.Frame(self.scrollable_frame)
-        mon_head.pack(fill="x", padx=20, pady=10)
-        ttk.Label(mon_head, text="【稼働状況モニター】", font=("Arial", 12, "bold")).pack(side="left")
+        # ヘッダー情報
+        self.pc_label = ctk.CTkLabel(self, text=f"PC: {self.pc_name}", font=("Arial", 12))
+        self.pc_label.pack(pady=5)
         
-        refresh_ctrl = ttk.Frame(mon_head)
-        refresh_ctrl.pack(side="right")
-        ttk.Label(refresh_ctrl, text="間隔(ms):").pack(side="left")
-        self.refresh_entry = ttk.Entry(refresh_ctrl, width=6)
-        self.refresh_entry.insert(0, str(self.config["refresh_ms"]))
-        self.refresh_entry.pack(side="left", padx=5)
-        ttk.Checkbutton(mon_head, text="リアルタイム更新ON", variable=self.auto_refresh).pack(side="right", padx=10)
+        self.status_label = ctk.CTkLabel(self, text="未稼働", font=("Arial", 18, "bold"), text_color="red")
+        self.status_label.pack(pady=5)
 
-        self.tree = ttk.Treeview(self.scrollable_frame, columns=("User", "Task", "Time", "IsAdmin"), show="headings", height=8)
-        self.tree.heading("User", text="利用者名"); self.tree.heading("Task", text="タスク")
-        self.tree.heading("Time", text="経過"); self.tree.heading("IsAdmin", text="権限")
-        self.tree.column("IsAdmin", width=80, anchor="center")
-        self.tree.pack(fill="x", padx=20)
+        # 【重要】作成と配置を分けることでAttributeErrorを回避
+        self.timer_label = ctk.CTkLabel(self, text="0:00:00", font=("Arial", 28))
+        self.timer_label.pack(pady=5)
 
-        # --- 2. ログ保存先（共有フォルダ） ---
-        ttk.Separator(self.scrollable_frame, orient="horizontal").pack(fill="x", pady=20)
-        path_frame = ttk.Frame(self.scrollable_frame)
-        path_frame.pack(fill="x", padx=20)
-        ttk.Label(path_frame, text="ログ出力先:").pack(side="left")
-        self.path_entry = ttk.Entry(path_frame)
-        self.path_entry.insert(0, self.config["save_path"])
-        self.path_entry.pack(side="left", fill="x", expand=True, padx=5)
-        ttk.Button(path_frame, text="参照", command=self.select_log_path).pack(side="left")
+        # タスク選択
+        ctk.CTkLabel(self, text="実行するタスクを選択:").pack(pady=5)
+        task_list = self.config.get("task_list", ["タスクが設定されていません"])
+        self.task_combo = ctk.CTkComboBox(self, values=task_list, width=280)
+        self.task_combo.pack(pady=10)
 
-        # --- 3. ユーザー割当 ---
-        ttk.Label(self.scrollable_frame, text="【ユーザー名 & 管理者 割当】", font=("Arial", 10, "bold")).pack(pady=(15, 0))
-        assign_frame = ttk.Frame(self.scrollable_frame)
-        assign_frame.pack(fill="x", padx=20, pady=5)
-        
-        ttk.Label(assign_frame, text="未割当PC:").grid(row=0, column=0, sticky="w")
-        self.pc_combo = ttk.Combobox(assign_frame, values=self.get_detected_pcs())
-        self.pc_combo.grid(row=0, column=1, padx=5, sticky="ew")
-        ttk.Label(assign_frame, text="表示名:").grid(row=0, column=2, sticky="w")
-        self.name_entry = ttk.Entry(assign_frame)
-        self.name_entry.grid(row=0, column=3, padx=5, sticky="ew")
-        
-        self.is_admin_var = tk.BooleanVar()
-        ttk.Checkbutton(assign_frame, text="管理者権限", variable=self.is_admin_var).grid(row=0, column=4, padx=5)
-        ttk.Button(assign_frame, text="リストに追加", command=self.add_mapping).grid(row=0, column=5, padx=5)
-        assign_frame.columnconfigure((1, 3), weight=1)
+        # メインアクション
+        self.start_btn = ctk.CTkButton(
+            self, text="▶ タスク開始 / 切替", 
+            command=self.switch_task, 
+            fg_color="#2E8B57", hover_color="#1E6B47", width=200, height=40
+        )
+        self.start_btn.pack(pady=15)
 
-        self.mapping_text = tk.Text(self.scrollable_frame, height=5)
-        self.refresh_mapping_display()
-        self.mapping_text.pack(fill="x", padx=20, pady=5)
-        ttk.Button(self.scrollable_frame, text="編集内容を反映", command=self.sync_mapping_from_text).pack(pady=2)
+        ctk.CTkLabel(self, text="──────────────────────────", text_color="gray").pack(pady=5)
 
-        # --- 4. タスクリスト ---
-        ttk.Separator(self.scrollable_frame, orient="horizontal").pack(fill="x", pady=20)
-        ttk.Label(self.scrollable_frame, text="【タスクリスト管理 (CSV連携)】", font=("Arial", 10, "bold")).pack()
-        t_btn_frame = ttk.Frame(self.scrollable_frame)
-        t_btn_frame.pack(pady=5)
-        ttk.Button(t_btn_frame, text="テンプレート(CSV)出力", command=self.export_tasks).pack(side="left", padx=5)
-        ttk.Button(t_btn_frame, text="CSVから一括読込", command=self.import_tasks).pack(side="left", padx=5)
+        # 休憩・終了
+        exit_frame = ctk.CTkFrame(self, fg_color="transparent")
+        exit_frame.pack(fill="x", padx=40, pady=10)
 
-        self.task_text = tk.Text(self.scrollable_frame, height=6)
-        self.task_text.insert("1.0", "\n".join(self.config["task_list"]))
-        self.task_text.pack(fill="x", padx=20, pady=5)
+        self.break_btn = ctk.CTkButton(exit_frame, text="☕ 休憩入り", command=self.start_break, fg_color="#D2691E", width=140)
+        self.break_btn.pack(side="left", padx=5, expand=True)
 
-        # --- 5. 最終保存 ---
-        action_frame = ttk.Frame(self.scrollable_frame)
-        action_frame.pack(pady=30)
-        ttk.Button(action_frame, text="共有設定を保存(確定)", command=self.save_to_shared_config, style="Accent.TButton").pack(side="left", padx=10)
-        ttk.Button(action_frame, text="全ログデータを集計出力", command=self.aggregate_data).pack(side="left", padx=10)
+        self.finish_btn = ctk.CTkButton(exit_frame, text="🏁 業務終了", command=self.finish_work, fg_color="#B22222", width=140)
+        self.finish_btn.pack(side="left", padx=5, expand=True)
 
-    # --- ロジック ---
-    def reset_connection(self):
-        if messagebox.askyesno("確認", "共有設定ファイルの参照先を変更しますか？\n(アプリを再起動します)"):
-            if os.path.exists(LOCAL_SETTING_FILE): os.remove(LOCAL_SETTING_FILE)
-            self.root.destroy()
+        # 設定変更ボタン
+        self.reset_btn = ctk.CTkButton(
+            self, text="設定ファイルを再選択", 
+            command=self.reset_config_path, 
+            fg_color="gray", width=150, height=20, font=("Arial", 10)
+        )
+        self.reset_btn.pack(pady=20)
 
-    def get_detected_pcs(self):
-        path = self.config["save_path"]
-        if not os.path.exists(path): return []
-        return [os.path.basename(f).replace(".csv", "") for f in glob.glob(os.path.join(path, "*.csv"))]
-
-    def add_mapping(self):
-        pc, name = self.pc_combo.get().strip(), self.name_entry.get().strip()
-        if not pc or not name: return
-        self.config["user_mapping"][pc] = name
-        if self.is_admin_var.get():
-            if pc not in self.config["admins"]: self.config["admins"].append(pc)
-        else:
-            if pc in self.config["admins"]: self.config["admins"].remove(pc)
-        self.refresh_mapping_display()
-        self.name_entry.delete(0, "end")
-
-    def sync_mapping_from_text(self):
-        new_map, new_adm = {}, []
-        for line in self.mapping_text.get("1.0", "end-1c").splitlines():
-            if ":" in line:
-                main = line.split("[")[0] if "[" in line else line
-                pc, name = [x.strip() for x in main.split(":", 1)]
-                new_map[pc] = name
-                if "[管理者]" in line: new_adm.append(pc)
-        self.config["user_mapping"], self.config["admins"] = new_map, new_adm
-        messagebox.showinfo("反映", "メモリ上に一時反映しました。最後に保存ボタンを押してください。")
-
-    def refresh_mapping_display(self):
-        self.mapping_text.delete("1.0", "end")
-        lines = [f"{pc} : {name} {'[管理者]' if pc in self.config['admins'] else ''}" 
-                 for pc, name in self.config["user_mapping"].items()]
-        self.mapping_text.insert("1.0", "\n".join(lines))
-
-    def refresh_monitor(self):
-        if self.auto_refresh.get():
-            for item in self.tree.get_children(): self.tree.delete(item)
-            path = self.config["save_path"]
-            if os.path.exists(path):
-                for f in glob.glob(os.path.join(path, "*.csv")):
-                    pc = os.path.basename(f).replace(".csv", "")
-                    name = self.config["user_mapping"].get(pc, pc)
-                    adm = "★" if pc in self.config["admins"] else ""
-                    try:
-                        with open(f, "r", encoding="utf-8-sig") as csv_f:
-                            r = list(csv.reader(csv_f))
-                            if len(r) > 1 and not r[-1][2]:
-                                start = datetime.strptime(r[-1][1], "%Y-%m-%d %H:%M:%S")
-                                elap = str(datetime.now() - start).split(".")[0]
-                                self.tree.insert("", "end", values=(name, r[-1][0], elap, adm))
-                    except: pass
+    def init_log_file(self):
         try:
-            ms = int(self.refresh_entry.get())
-        except: ms = 3000
-        self.root.after(ms, self.refresh_monitor)
-
-    def select_log_path(self):
-        p = filedialog.askdirectory()
-        if p:
-            self.path_entry.delete(0, "end"); self.path_entry.insert(0, p)
-            self.pc_combo["values"] = self.get_detected_pcs()
-
-    def save_to_shared_config(self):
-        """共有フォルダのconfig.jsonを上書きする"""
-        self.config["save_path"] = self.path_entry.get()
-        self.config["task_list"] = [t for t in self.task_text.get("1.0", "end-1c").splitlines() if t.strip()]
-        try:
-            self.config["refresh_ms"] = int(self.refresh_entry.get())
-        except: self.config["refresh_ms"] = 3000
-        
-        try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(self.config, f, indent=4, ensure_ascii=False)
-            messagebox.showinfo("成功", f"共有設定を保存しました:\n{self.config_path}")
+            os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+            if not os.path.exists(self.log_file):
+                with open(self.log_file, "w", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["タスク名", "開始時間", "終了時間"])
         except Exception as e:
-            messagebox.showerror("保存失敗", f"共有ファイルへの書き込み権限がない可能性があります:\n{e}")
+            messagebox.showerror("接続エラー", f"共有フォルダにアクセスできません:\n{e}")
 
-    def export_tasks(self):
-        p = filedialog.asksaveasfilename(defaultextension=".csv", initialfile="task_list.csv")
-        if p:
-            with open(p, "w", encoding="utf-8-sig", newline="") as f:
+    def save_log(self, task, start, end):
+        try:
+            end_str = end.strftime("%Y-%m-%d %H:%M:%S") if end else ""
+            with open(self.log_file, "a", encoding="utf-8-sig", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["task_name"])
-                for t in self.task_text.get("1.0", "end-1c").splitlines():
-                    if t.strip(): writer.writerow([t.strip()])
+                writer.writerow([task, start.strftime("%Y-%m-%d %H:%M:%S"), end_str])
+        except Exception as e:
+            print(f"Log Save Error: {e}")
 
-    def import_tasks(self):
-        p = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
-        if p:
-            with open(p, "r", encoding="utf-8-sig") as f:
-                reader = csv.reader(f); next(reader)
-                tasks = [r[0] for r in reader if r]
-            self.task_text.delete("1.0", "end"); self.task_text.insert("1.0", "\n".join(tasks))
+    def stop_current_task(self):
+        if self.current_task and self.start_time:
+            self.save_log(self.current_task, self.start_time, datetime.now())
 
-    def aggregate_data(self):
-        save_file = filedialog.asksaveasfilename(defaultextension=".csv", initialfile=f"aggregate_{datetime.now().strftime('%Y%m%d')}.csv")
-        if not save_file: return
-        all_files = glob.glob(os.path.join(self.config["save_path"], "*.csv"))
-        with open(save_file, "w", encoding="utf-8-sig", newline="") as out_f:
-            writer = csv.writer(out_f)
-            writer.writerow(["表示名", "PC名", "管理者", "タスク", "開始", "終了"])
-            for f in all_files:
-                pc = os.path.basename(f).replace(".csv", "")
-                name = self.config["user_mapping"].get(pc, pc)
-                adm = "YES" if pc in self.config["admins"] else "NO"
-                try:
-                    with open(f, "r", encoding="utf-8-sig") as in_f:
-                        r = csv.reader(in_f); next(r)
-                        for row in r: writer.writerow([name, pc, adm] + row)
-                except: pass
-        messagebox.showinfo("成功", "集計完了")
+    def switch_task(self):
+        new_task = self.task_combo.get()
+        if not new_task or new_task == "タスクが設定されていません":
+            return
+            
+        self.stop_current_task()
+        self.current_task = new_task
+        self.start_time = datetime.now()
+        self.save_log(self.current_task, self.start_time, None)
+        
+        # --- ここが重要！ ---
+        # 1. ステータスを即更新
+        self.status_label.configure(text=f"稼働中: {self.current_task}", text_color="#00FFFF")
+        # 2. 1秒待たずに「今すぐ」画面表示を更新する関数を呼ぶ
+        self.refresh_timer_display()
+
+    def refresh_timer_display(self):
+        """1秒待たずに、現在の経過時間を即座にラベルに反映する"""
+        if self.current_task and self.start_time:
+            elapsed = datetime.now() - self.start_time
+            time_str = str(elapsed).split(".")[0]
+            self.timer_label.configure(text=time_str)
+
+    def update_timer(self):
+        """1秒ごとに実行されるループ"""
+        # 表示を更新する
+        self.refresh_timer_display()
+        
+        # 次の1秒後を予約
+        self.after(1000, self.update_timer)
+
+    def start_break(self):
+        if self.current_task == "休憩": return
+        self.stop_current_task()
+        self.current_task = "休憩"
+        self.start_time = datetime.now()
+        self.save_log(self.current_task, self.start_time, None)
+        self.status_label.configure(text="休憩中", text_color="#FFA500")
+        self.task_combo.set("休憩")
+
+    def finish_work(self):
+        if not self.current_task: return
+        if messagebox.askyesno("業務終了", "本日の業務を終了しますか？"):
+            self.stop_current_task()
+            self.current_task = None
+            self.start_time = None
+            self.status_label.configure(text="業務終了", text_color="red")
+            self.timer_label.configure(text="00:00:00")
+
+    def update_timer(self):
+        """1秒ごとに実行されるループ"""
+        if self.current_task and self.start_time:
+            elapsed = datetime.now() - self.start_time
+            # timedeltaの文字列表現 (H:MM:SS) を取得
+            time_str = str(elapsed).split(".")[0]
+            
+            # もし 0:00:00.123 のようにドットが残る場合の対策として
+            # 常に「時:分:秒」の形になるようにセット
+            self.timer_label.configure(text=time_str)
+        
+        self.after(1000, self.update_timer)
+
+    def reset_config_path(self):
+        if messagebox.askyesno("確認", "設定ファイルの参照先を変更しますか？"):
+            if os.path.exists(LOCAL_SETTING_FILE):
+                os.remove(LOCAL_SETTING_FILE)
+            self.destroy()
+            messagebox.showinfo("完了", "設定をリセットしました。再起動してください。")
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = AdminApp(root)
-    root.mainloop()
+    app = UserApp()
+    # 起動に失敗（パス未選択など）した場合はmainloopに入らない
+    if hasattr(app, "winfo_exists") and app.winfo_exists():
+        app.mainloop()
