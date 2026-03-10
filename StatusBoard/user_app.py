@@ -129,37 +129,65 @@ class UserApp(ctk.CTk):
 
     def save_log(self, task, start, end):
         try:
+            start_str = start.strftime("%Y-%m-%d %H:%M:%S")
             end_str = end.strftime("%Y-%m-%d %H:%M:%S") if end else ""
-            with open(self.log_file, "a", encoding="utf-8-sig", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([task, start.strftime("%Y-%m-%d %H:%M:%S"), end_str])
+            
+            # 全行読み込む
+            lines = []
+            if os.path.exists(self.log_file):
+                with open(self.log_file, "r", encoding="utf-8-sig", newline="") as f:
+                    lines = list(csv.reader(f))
+
+            # 最終行が「同じタスク名・同じ開始時間・終了が空」なら、その行を更新する
+            updated = False
+            if len(lines) > 1:
+                last_row = lines[-1]
+                if last_row[0] == task and last_row[1] == start_str and last_row[2] == "":
+                    lines[-1][2] = end_str
+                    updated = True
+            
+            if updated:
+                # 上書き保存
+                with open(self.log_file, "w", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerows(lines)
+            else:
+                # 新規追記（開始時の書き込みなど）
+                with open(self.log_file, "a", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([task, start_str, end_str])
+                    
         except Exception as e:
             print(f"Log Save Error: {e}")
 
     def stop_current_task(self):
-        """現在稼働中のタスクがあればCSVに書き出して終了する"""
+        """現在稼働中のタスクがあれば、既存の行の終了時間を埋める"""
         if self.current_task and self.start_time:
-            # ここで初めてCSVに1行書き込まれる
+            # save_logの中で、開始時間が一致する行を探して終了時間を書き込む
             self.save_log(self.current_task, self.start_time, datetime.now())
-            # 状態をリセット
             self.current_task = None
             self.start_time = None
-
-    def switch_task(self):
-        new_task = self.task_combo.get()
-        if not new_task or new_task == "タスクが設定されていません":
-            return
             
-        # 1. 今までやってたタスクがあれば、その「終了」をログに記録する
-        self.stop_current_task()
-        
-        # 2. 新しいタスクの状態をセット（ここではまだCSVには書かない！）
-        self.current_task = new_task
-        self.start_time = datetime.now()
-        
-        # 3. UIの表示だけ即座に更新する
-        self.status_label.configure(text=f"稼働中: {self.current_task}", text_color="#00FFFF")
-        self.refresh_timer_display()
+    def switch_task(self):
+            new_task = self.task_combo.get()
+            if not new_task or new_task == "タスクが設定されていません":
+                return
+                
+            # 1. 今までやってたタスクがあれば、その「終了」をログに記録する
+            self.stop_current_task()
+            
+            # 2. 新しいタスクの状態をセット
+            self.current_task = new_task
+            self.start_time = datetime.now()
+            
+            # --- ここを追加！ ---
+            # 開始した瞬間に「終了時間(None)」の状態で一行書き込んでしまう
+            self.save_log(self.current_task, self.start_time, None)
+            # ------------------
+            
+            # 3. UIの表示を更新
+            self.status_label.configure(text=f"稼働中: {self.current_task}", text_color="#00FFFF")
+            self.refresh_timer_display()
 
     def refresh_timer_display(self):
         """1秒待たずに、現在の経過時間を即座にラベルに反映する"""
